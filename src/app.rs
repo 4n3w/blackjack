@@ -20,12 +20,20 @@ const OPENING_CARDS: usize = 4;
 pub struct App {
     pub game: Game,
     pub should_quit: bool,
+    /// What to print on the way out, once the terminal has been handed back.
+    /// Set when the house shows the player the door.
+    pub farewell: Option<String>,
     /// Whether to show the running count. On by default — the whole reason to
     /// keep one is to be able to watch it.
     pub show_count: bool,
     /// How many cards of the opening deal have landed on the table.
     dealt: usize,
     last_step: Instant,
+    /// Gap between cards of the opening deal, and between the dealer's draws.
+    /// Fields rather than constants so tests can run the loop without waiting
+    /// on a real clock.
+    deal_interval: Duration,
+    dealer_interval: Duration,
 }
 
 impl App {
@@ -37,10 +45,22 @@ impl App {
         Self {
             game,
             should_quit: false,
+            farewell: None,
             show_count: true,
             dealt: 0,
             last_step: Instant::now(),
+            deal_interval: DEAL_INTERVAL,
+            dealer_interval: DEALER_INTERVAL,
         }
+    }
+
+    /// Deal and draw instantly, so a test can drive whole rounds without
+    /// sitting through the animation.
+    #[cfg(test)]
+    pub fn without_delays(mut self) -> Self {
+        self.deal_interval = Duration::ZERO;
+        self.dealer_interval = Duration::ZERO;
+        self
     }
 
     /// How many of the dealer's cards to draw. Everything is on the table
@@ -64,9 +84,15 @@ impl App {
 
     /// Advance whatever is currently animating.
     pub fn tick(&mut self) {
+        // Checked here rather than at any one call site so that however the
+        // player arrives at an empty purse, the house notices.
+        if self.game.is_broke() {
+            self.show_the_door();
+            return;
+        }
         match self.game.phase {
             Phase::Dealing => {
-                if self.last_step.elapsed() >= DEAL_INTERVAL {
+                if self.last_step.elapsed() >= self.deal_interval {
                     self.last_step = Instant::now();
                     if self.dealt < OPENING_CARDS {
                         self.dealt += 1;
@@ -75,7 +101,7 @@ impl App {
                     }
                 }
             }
-            Phase::Dealer if self.last_step.elapsed() >= DEALER_INTERVAL => {
+            Phase::Dealer if self.last_step.elapsed() >= self.dealer_interval => {
                 self.last_step = Instant::now();
                 self.game.dealer_step();
             }
@@ -148,6 +174,19 @@ impl App {
         }
     }
 
+    /// Out of chips: end the session and leave a parting word in the shell.
+    fn show_the_door(&mut self) {
+        if self.farewell.is_some() {
+            return;
+        }
+        let hands = self.game.rounds_played;
+        let plural = if hands == 1 { "hand" } else { "hands" };
+        self.farewell = Some(format!(
+            "You are out of chips after {hands} {plural}.\nStay out of my casino, Lebowski."
+        ));
+        self.should_quit = true;
+    }
+
     fn start_deal(&mut self) {
         if !self.game.can_deal() {
             return;
@@ -167,6 +206,7 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::MIN_BET;
     use crossterm::event::KeyEventKind;
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -313,6 +353,58 @@ mod tests {
             assert_eq!(a.game.phase, Phase::Settled);
             assert!(a.game.hands[0].is_surrendered());
         }
+    }
+
+    // -- running dry ------------------------------------------------------
+
+    #[test]
+    fn losing_the_last_chip_ends_the_session() {
+        let mut a = app();
+        a.game.bankroll = 0;
+        a.tick();
+        assert!(a.should_quit);
+        let farewell = a.farewell.expect("the house should say something");
+        assert!(farewell.contains("Stay out of my casino, Lebowski."));
+    }
+
+    /// Enough for the table minimum is not broke, however thin it looks.
+    #[test]
+    fn the_last_five_dollars_keeps_you_at_the_table() {
+        let mut a = app();
+        a.game.bankroll = MIN_BET;
+        a.tick();
+        assert!(!a.should_quit);
+        assert!(a.farewell.is_none());
+    }
+
+    /// Being unable to cover the *minimum* is what ends it, not being at zero.
+    #[test]
+    fn a_purse_below_the_minimum_ends_it_too() {
+        let mut a = app();
+        a.game.bankroll = MIN_BET - 1;
+        a.tick();
+        assert!(a.should_quit);
+    }
+
+    /// Mid-round a thin bankroll is normal — the wager is already on the table.
+    #[test]
+    fn an_empty_purse_mid_round_is_not_being_broke() {
+        let mut a = app();
+        a.on_key(press(KeyCode::Enter));
+        a.game.bankroll = 0;
+        a.tick();
+        assert!(!a.should_quit, "the hand in progress must be played out");
+    }
+
+    #[test]
+    fn the_farewell_counts_the_hands_played() {
+        let mut a = app();
+        a.on_key(press(KeyCode::Enter));
+        a.game.bankroll = 0;
+        a.game.phase = Phase::Betting;
+        a.tick();
+        let farewell = a.farewell.unwrap();
+        assert!(farewell.contains("after 1 hand."), "got: {farewell}");
     }
 
     #[test]

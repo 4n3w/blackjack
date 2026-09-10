@@ -146,6 +146,8 @@ pub struct Game {
     pub hole_revealed: bool,
     /// Hi-Lo running count of every card seen since the shoe was shuffled.
     running_count: i32,
+    /// Rounds dealt, for the sake of the parting words.
+    pub rounds_played: u32,
     /// Total put at risk this round, for reporting the net result.
     staked: u32,
     returned: u32,
@@ -210,6 +212,7 @@ impl Game {
             insurance: 0,
             hole_revealed: false,
             running_count: 0,
+            rounds_played: 0,
             staked: 0,
             returned: 0,
             message: String::from("Place your bet."),
@@ -317,6 +320,7 @@ impl Game {
         self.staked = self.bet;
         self.returned = 0;
         self.bankroll -= self.bet;
+        self.rounds_played += 1;
         self.message.clear();
 
         for _ in 0..2 {

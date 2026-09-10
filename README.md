@@ -25,6 +25,10 @@ actions are dimmed rather than hidden.
 | settled | `ENTER` next hand |
 | any | `C` show/hide the count, `Q` or `Ctrl-C` quit |
 
+Run out of chips — that is, drop below the table minimum — and the house ends
+the session for you, with a parting word printed to the shell once the
+terminal has been handed back.
+
 ## House rules
 
 Six decks, dealer stands on all 17s, blackjack pays 3:2, double on any two
@@ -78,6 +82,12 @@ however large the bet.
 awkward parts (soft aces, split aces, whether a two-card 21 counts as a
 natural, insurance settling independently of the main bet) testable without a
 terminal.
+
+The main loop takes key presses through an `Input` trait and is generic over
+the backend, so tests drive the real loop with scripted keys against ratatui's
+`TestBackend` rather than a live terminal. `App::without_delays` zeroes the
+deal and dealer pacing for those, which is what lets fifty seeded sessions be
+played all the way to bankruptcy in under a second.
 
 ## Tests
 

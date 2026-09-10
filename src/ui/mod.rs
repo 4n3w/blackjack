@@ -374,9 +374,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, game: &Game) {
     let mut keys: Vec<Span> = Vec::new();
     match game.phase {
         Phase::Betting => {
-            if game.is_broke() {
-                keys.push(Span::styled("Out of chips. ", Style::new().fg(theme::LOSE)));
-            }
+            // No "out of chips" branch here: running dry ends the session
+            // before the table is drawn again. See `App::show_the_door`.
             key(&mut keys, "←/→", "bet", true);
             key(&mut keys, "1/2/3/4", "chips", true);
             key(&mut keys, "ENTER", "deal", game.can_deal());
