@@ -1,0 +1,13 @@
+---
+source: src/ui/card.rs
+expression: "render(CardWidget::face_up(Card::new(Rank::Ten, Suit::Clubs)))"
+---
+"╭───────╮"
+"│10♣    │"
+"│ ♣   ♣ │"
+"│ ♣ ♣ ♣ │"
+"│       │"
+"│ ♣ ♣ ♣ │"
+"│ ♣   ♣ │"
+"│    ♣10│"
+"╰───────╯"

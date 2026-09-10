@@ -1,0 +1,16 @@
+---
+source: src/ui/mod.rs
+expression: "table(&app, 40, 12)"
+---
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"Make the window taller — 23 rows needed "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
