@@ -1,0 +1,7 @@
+---
+source: src/ui/chip.rs
+expression: "render(Chip::new(DENOMINATIONS[2]), CHIP_WIDTH, CHIP_HEIGHT)"
+---
+" ▄▄▄ "
+" 25  "
+" ▀▀▀ "

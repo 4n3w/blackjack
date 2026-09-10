@@ -20,6 +20,9 @@ const OPENING_CARDS: usize = 4;
 pub struct App {
     pub game: Game,
     pub should_quit: bool,
+    /// Whether to show the running count. On by default — the whole reason to
+    /// keep one is to be able to watch it.
+    pub show_count: bool,
     /// How many cards of the opening deal have landed on the table.
     dealt: usize,
     last_step: Instant,
@@ -34,6 +37,7 @@ impl App {
         Self {
             game,
             should_quit: false,
+            show_count: true,
             dealt: 0,
             last_step: Instant::now(),
         }
@@ -90,6 +94,11 @@ impl App {
             self.should_quit = true;
             return;
         }
+        // The count can be hidden at any point, including mid-hand.
+        if matches!(key.code, KeyCode::Char('c' | 'C')) {
+            self.show_count = !self.show_count;
+            return;
+        }
 
         match self.game.phase {
             Phase::Betting => self.on_betting_key(key.code),
@@ -108,6 +117,7 @@ impl App {
                 KeyCode::Char('s' | 'S') => self.game.act(Action::Stand),
                 KeyCode::Char('d' | 'D') => self.game.act(Action::Double),
                 KeyCode::Char('p' | 'P') => self.game.act(Action::Split),
+                KeyCode::Char('r' | 'R') => self.game.act(Action::Surrender),
                 _ => {}
             },
             Phase::Dealer => {}
@@ -270,6 +280,39 @@ mod tests {
 
         a.on_key(press(KeyCode::Enter));
         assert_eq!(a.game.phase, Phase::Betting, "Enter starts the next round");
+    }
+
+    #[test]
+    fn c_toggles_the_count() {
+        let mut a = app();
+        assert!(a.show_count, "the count is on by default");
+        a.on_key(press(KeyCode::Char('c')));
+        assert!(!a.show_count);
+        a.on_key(press(KeyCode::Char('C')));
+        assert!(a.show_count);
+    }
+
+    /// A plain `c` hides the count; only Ctrl-C quits.
+    #[test]
+    fn c_does_not_quit() {
+        let mut a = app();
+        a.on_key(press(KeyCode::Char('c')));
+        assert!(!a.should_quit);
+    }
+
+    #[test]
+    fn r_surrenders() {
+        let mut a = app();
+        a.on_key(press(KeyCode::Enter));
+        a.on_key(press(KeyCode::Char('x')));
+        if a.game.phase == Phase::Insurance {
+            a.on_key(press(KeyCode::Char('n')));
+        }
+        if a.game.phase == Phase::Player && a.game.can(Action::Surrender) {
+            a.on_key(press(KeyCode::Char('r')));
+            assert_eq!(a.game.phase, Phase::Settled);
+            assert!(a.game.hands[0].is_surrendered());
+        }
     }
 
     #[test]

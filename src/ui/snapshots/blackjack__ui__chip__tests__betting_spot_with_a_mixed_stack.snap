@@ -1,0 +1,9 @@
+---
+source: src/ui/chip.rs
+expression: "render(BettingSpot::new(135, true), 40, SPOT_HEIGHT)"
+---
+"         ╱▔▔▔▔▔▔▔▔$135▔▔▔▔▔▔▔▔╲         "
+"        ╱  ▄▄▄   ▄▄▄   ▄▄▄     ╲        "
+"       ▕   100   25     5   ×2  ▏       "
+"        ╲  ▀▀▀   ▀▀▀   ▀▀▀     ╱        "
+"         ╲▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁╱         "

@@ -1,6 +1,7 @@
 //! Everything that knows about the terminal.
 
 pub mod card;
+pub mod chip;
 pub mod theme;
 
 use ratatui::Frame;
@@ -14,6 +15,7 @@ use crate::app::App;
 use crate::cards::Hand;
 use crate::game::{Action, Game, Outcome, Phase, PlayerHand};
 use card::{CARD_HEIGHT, CARD_WIDTH, CardWidget, fan_stride, fan_width};
+use chip::{CHIP_HEIGHT, SPOT_HEIGHT};
 
 /// Rows the big-text banner needs.
 const BANNER_ROWS: u16 = 5;
@@ -43,7 +45,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     } else {
         0
     };
-    let [banner, dealer, _gap, player, status, footer] = Layout::vertical([
+    let [banner, dealer, gap, player, status, footer] = Layout::vertical([
         Constraint::Length(banner_rows),
         Constraint::Length(DEALER_ROWS),
         Constraint::Min(0),
@@ -57,9 +59,30 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_banner(frame, banner, &app.game);
     }
     draw_dealer(frame, dealer, app);
+    draw_betting_spot(frame, gap, &app.game);
     draw_player(frame, player, app);
-    draw_status(frame, status, &app.game);
+    draw_status(frame, status, app);
     draw_footer(frame, footer, &app.game);
+}
+
+/// The bet, as chips on the felt between the dealer and the player.
+///
+/// This lives in whatever slack the layout has left over, so it takes the
+/// painted outline when there is room and falls back to bare chips — then to
+/// nothing at all — as the table gets shorter.
+fn draw_betting_spot(frame: &mut Frame, area: Rect, game: &Game) {
+    let amount = game.wagered();
+    if amount == 0 || area.height < CHIP_HEIGHT {
+        return;
+    }
+    let outlined = area.height >= SPOT_HEIGHT;
+    let height = if outlined { SPOT_HEIGHT } else { CHIP_HEIGHT };
+    // Centre it in the gap rather than letting it ride against the dealer.
+    let y = area.y + (area.height - height) / 2;
+    frame.render_widget(
+        chip::BettingSpot::new(amount, outlined),
+        Rect::new(area.x, y, area.width, height),
+    );
 }
 
 fn draw_too_small(frame: &mut Frame, area: Rect) {
@@ -294,7 +317,9 @@ fn draw_fan(frame: &mut Frame, area: Rect, hand: &Hand, face_down: Option<usize>
     }
 }
 
-fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
+/// What just happened on the left, and the state of the shoe on the right.
+fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
+    let game = &app.game;
     let text = if game.message.is_empty() {
         match game.phase {
             Phase::Player => String::from("Your move."),
@@ -304,10 +329,45 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
     } else {
         game.message.clone()
     };
+
+    let mut right = vec![
+        Span::styled(
+            format!("${}", game.bankroll),
+            Style::new().fg(theme::TRIM).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  shoe {}", game.shoe_len()),
+            Style::new().fg(theme::TEXT_DIM),
+        ),
+    ];
+    if app.show_count {
+        let rc = game.running_count();
+        // A positive count is the one worth betting into, so colour it like a
+        // win and the negative like a loss.
+        let colour = match rc {
+            0 => theme::TEXT_DIM,
+            n if n > 0 => theme::WIN,
+            _ => theme::LOSE,
+        };
+        right.push(Span::styled(
+            format!("  count {rc:+}"),
+            Style::new().fg(colour),
+        ));
+        right.push(Span::styled(
+            format!(" ({:+.1} true)", game.true_count()),
+            Style::new().fg(theme::TEXT_DIM),
+        ));
+    }
+    let right_width = right.iter().map(|s| s.content.len() as u16).sum::<u16>() + 2;
+
+    let inner = area.inner(Margin::new(PAD, 0));
+    let [msg_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(inner);
     frame.render_widget(
         Line::from(Span::styled(text, Style::new().fg(theme::TEXT))),
-        area.inner(Margin::new(PAD, 0)),
+        msg_area,
     );
+    frame.render_widget(Line::from(right).right_aligned(), right_area);
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, game: &Game) {
@@ -331,6 +391,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, game: &Game) {
             key(&mut keys, "S", "stand", game.can(Action::Stand));
             key(&mut keys, "D", "double", game.can(Action::Double));
             key(&mut keys, "P", "split", game.can(Action::Split));
+            key(&mut keys, "R", "fold", game.can(Action::Surrender));
         }
         Phase::Dealer => keys.push(Span::styled(
             "dealer draws…",
@@ -338,27 +399,12 @@ fn draw_footer(frame: &mut Frame, area: Rect, game: &Game) {
         )),
         Phase::Settled => key(&mut keys, "ENTER", "next hand", true),
     }
+    key(&mut keys, "C", "count", true);
     key(&mut keys, "Q", "quit", true);
 
-    let money = format!("${}", game.bankroll);
-    let rest = format!("  bet ${}  shoe {}", game.bet, game.shoe_len());
-    // Two extra cells keep the key list from ever touching the purse.
-    let purse_width = (money.len() + rest.len()) as u16 + 2;
-    let purse = Line::from(vec![
-        Span::styled(
-            money,
-            Style::new().fg(theme::TRIM).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(rest, Style::new().fg(theme::TEXT_DIM)),
-    ])
-    .right_aligned();
-
-    // Give the purse its own column so a long key list cannot run into it.
-    let inner = area.inner(Margin::new(PAD, 0));
-    let [keys_area, purse_area] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(purse_width)]).areas(inner);
-    frame.render_widget(Line::from(keys), keys_area);
-    frame.render_widget(purse, purse_area);
+    // The bankroll and shoe live on the status line above, so the footer is
+    // the key list and nothing else.
+    frame.render_widget(Line::from(keys), area.inner(Margin::new(PAD, 0)));
 }
 
 /// Push a `KEY label` pair, dimmed when the action is not available.
@@ -467,6 +513,52 @@ mod tests {
         g.hole_revealed = true;
         g.settle();
         insta::assert_snapshot!(table(&App::with_game(g), 74, 32));
+    }
+
+    /// A tall table has room for the painted outline around the chips.
+    #[test]
+    fn tall_window_paints_the_betting_spot() {
+        let app = App::with_game(staged());
+        insta::assert_snapshot!(table(&app, 74, 36));
+    }
+
+    /// A mixed wager should stack out into several chips.
+    #[test]
+    fn a_mixed_wager_stacks_several_chips() {
+        let g = Game::staged(
+            hand(&[(Rank::Ten, D), (Rank::Four, C)]),
+            vec![player(&[(Rank::Ace, S), (Rank::Seven, H)], 135)],
+            Phase::Player,
+        );
+        insta::assert_snapshot!(table(&App::with_game(g), 74, 36));
+    }
+
+    #[test]
+    fn surrendered_hand_is_labelled_and_bannered() {
+        let mut g = Game::staged(
+            hand(&[(Rank::Ten, D), (Rank::Four, C)]),
+            vec![player(&[(Rank::Ten, S), (Rank::Six, H)], 25)],
+            Phase::Player,
+        );
+        g.act(Action::Surrender);
+        insta::assert_snapshot!(table(&App::with_game(g), 74, 36));
+    }
+
+    /// Hiding the count must take the readout away but leave the key that
+    /// brings it back.
+    #[test]
+    fn count_can_be_hidden() {
+        let mut app = App::with_game(staged());
+        app.show_count = true;
+        assert!(table(&app, 74, 32).contains("true)"));
+
+        app.show_count = false;
+        let hidden = table(&app, 74, 32);
+        assert!(!hidden.contains("true)"), "the readout should be gone");
+        assert!(
+            hidden.contains("C count"),
+            "the toggle should still be shown"
+        );
     }
 
     #[test]

@@ -1,0 +1,7 @@
+---
+source: src/ui/chip.rs
+expression: "render(BettingSpot::new(135, false), 40, CHIP_HEIGHT)"
+---
+"           ▄▄▄   ▄▄▄   ▄▄▄              "
+"           100   25     5   ×2          "
+"           ▀▀▀   ▀▀▀   ▀▀▀              "

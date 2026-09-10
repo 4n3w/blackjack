@@ -91,6 +91,20 @@ impl Rank {
         matches!(self, Self::Jack | Self::Queen | Self::King)
     }
 
+    /// This rank's Hi-Lo counting value.
+    ///
+    /// The classic balanced count: low cards are good for the dealer, so
+    /// seeing them go raises the count in the player's favour. Summed over a
+    /// whole deck it comes to zero, which is what makes the true count
+    /// meaningful once it is divided by the decks left.
+    pub const fn hi_lo(self) -> i32 {
+        match self {
+            Self::Two | Self::Three | Self::Four | Self::Five | Self::Six => 1,
+            Self::Seven | Self::Eight | Self::Nine => 0,
+            Self::Ten | Self::Jack | Self::Queen | Self::King | Self::Ace => -1,
+        }
+    }
+
     /// Aces count as 1 here; [`Hand::value`] promotes one to 11 when it can.
     pub const fn base_value(self) -> u8 {
         match self {
@@ -272,6 +286,23 @@ mod tests {
     fn blackjack_is_two_cards_only() {
         assert!(hand(&[Rank::Ace, Rank::King]).is_blackjack());
         assert!(!hand(&[Rank::Seven, Rank::Seven, Rank::Seven]).is_blackjack());
+    }
+
+    /// A balanced count sums to zero over a whole deck. If it does not, the
+    /// true count is meaningless.
+    #[test]
+    fn hi_lo_is_balanced_across_a_deck() {
+        let deck = Deck::new(1);
+        let total: i32 = deck.cards.iter().map(|c| c.rank.hi_lo()).sum();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn hi_lo_splits_the_ranks_five_three_five() {
+        let counts = |v: i32| Rank::ALL.iter().filter(|r| r.hi_lo() == v).count();
+        assert_eq!(counts(1), 5, "2 through 6");
+        assert_eq!(counts(0), 3, "7 through 9");
+        assert_eq!(counts(-1), 5, "tens and aces");
     }
 
     #[test]

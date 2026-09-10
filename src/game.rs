@@ -8,7 +8,12 @@
 //! House rules implemented here: six decks, dealer stands on all 17s, blackjack
 //! pays 3:2, double on any two cards including after a split, split up to four
 //! hands, split aces get one card each and cannot be resplit, insurance offered
-//! when the dealer shows an ace.
+//! when the dealer shows an ace, late surrender on the first two cards of an
+//! unsplit hand.
+//!
+//! A Hi-Lo running count is kept as a side effect of play. It counts a card at
+//! the moment the player could actually see it, not when it leaves the shoe —
+//! see [`Game::see`].
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -38,6 +43,8 @@ pub enum Outcome {
     Push,
     Lose,
     Bust,
+    /// Folded before drawing, for half the bet back.
+    Surrendered,
 }
 
 impl Outcome {
@@ -48,6 +55,7 @@ impl Outcome {
             Self::Push => "PUSH",
             Self::Lose => "LOSE",
             Self::Bust => "BUST",
+            Self::Surrendered => "SURRENDER",
         }
     }
 
@@ -86,6 +94,15 @@ impl PlayerHand {
     pub fn is_natural(&self) -> bool {
         !self.from_split && self.hand.is_blackjack()
     }
+
+    pub fn is_surrendered(&self) -> bool {
+        self.outcome == Some(Outcome::Surrendered)
+    }
+
+    /// Still in the running, so the dealer has something to play against.
+    pub fn is_live(&self) -> bool {
+        !self.hand.is_bust() && !self.is_surrendered()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,6 +127,7 @@ pub enum Action {
     Stand,
     Double,
     Split,
+    Surrender,
 }
 
 pub struct Game {
@@ -126,6 +144,8 @@ pub struct Game {
     /// Amount staked on insurance this round; zero if declined or not offered.
     pub insurance: u32,
     pub hole_revealed: bool,
+    /// Hi-Lo running count of every card seen since the shoe was shuffled.
+    running_count: i32,
     /// Total put at risk this round, for reporting the net result.
     staked: u32,
     returned: u32,
@@ -147,8 +167,9 @@ impl Game {
     /// A game part-way through a round with known cards on the table.
     ///
     /// Tests and UI snapshots need exact hands, which the shoe will not oblige
-    /// with. This takes the wagers out of the bankroll and records them, so the
-    /// money still adds up when the round settles.
+    /// with. This takes the wagers out of the bankroll and records them, and
+    /// counts everything face up, so both the money and the count add up the
+    /// way they would have had the cards come off the shoe normally.
     #[cfg(test)]
     pub fn staged(dealer: Hand, hands: Vec<PlayerHand>, phase: Phase) -> Self {
         let mut g = Self::seeded(1);
@@ -159,6 +180,18 @@ impl Game {
         g.hands = hands;
         g.phase = phase;
         g.message = String::new();
+
+        // Everything the player can see: their own cards, and the upcard.
+        let seen: Vec<Card> = g
+            .hands
+            .iter()
+            .flat_map(|h| h.hand.cards.iter())
+            .chain(g.dealer.cards.first())
+            .copied()
+            .collect();
+        for c in seen {
+            g.see(c);
+        }
         g
     }
 
@@ -176,6 +209,7 @@ impl Game {
             phase: Phase::Betting,
             insurance: 0,
             hole_revealed: false,
+            running_count: 0,
             staked: 0,
             returned: 0,
             message: String::from("Place your bet."),
@@ -184,6 +218,48 @@ impl Game {
 
     pub fn shoe_len(&self) -> usize {
         self.shoe.len()
+    }
+
+    // -- the count --------------------------------------------------------
+
+    /// Take note of a card the player can now see.
+    ///
+    /// Counting happens at the moment a card becomes *visible*, not when it is
+    /// drawn: the hole card sits face down on the table for most of a round
+    /// and must not move the count until it is turned over. The opening deal
+    /// is counted by [`Game::finish_dealing`] for the same reason — the UI is
+    /// still sliding those cards out when they leave the shoe.
+    fn see(&mut self, card: Card) {
+        self.running_count += card.rank.hi_lo();
+    }
+
+    /// The Hi-Lo running count.
+    pub fn running_count(&self) -> i32 {
+        self.running_count
+    }
+
+    /// Decks left in the shoe, to the nearest half — how a counter would
+    /// eyeball the discard tray rather than tracking exact cards.
+    pub fn decks_remaining(&self) -> f32 {
+        let exact = self.shoe.len() as f32 / 52.0;
+        (exact * 2.0).round().max(1.0) / 2.0
+    }
+
+    /// The running count normalised by the decks still to come, which is the
+    /// number that actually says how favourable the shoe is.
+    pub fn true_count(&self) -> f32 {
+        self.running_count as f32 / self.decks_remaining()
+    }
+
+    /// Turn the hole card over, counting it as it goes face up.
+    fn reveal_hole(&mut self) {
+        if self.hole_revealed {
+            return;
+        }
+        self.hole_revealed = true;
+        if let Some(&c) = self.dealer.cards.get(1) {
+            self.see(c);
+        }
     }
 
     /// The hand the player is currently acting on, if any.
@@ -225,10 +301,12 @@ impl Game {
         if !self.can_deal() {
             return;
         }
-        // Only ever reshuffle between rounds, never mid-hand.
+        // Only ever reshuffle between rounds, never mid-hand. A fresh shoe
+        // wipes the count with it — that is the whole point of the shuffle.
         if self.shoe.len() < RESHUFFLE_AT {
             self.shoe = Deck::new(SHOE_DECKS);
             self.shoe.shuffle(&mut self.rng);
+            self.running_count = 0;
         }
 
         self.dealer = Hand::default();
@@ -255,6 +333,19 @@ impl Game {
         if self.phase != Phase::Dealing {
             return;
         }
+        // Now that the cards are face up on the table, they count. The hole
+        // card is the exception; it waits for `reveal_hole`.
+        let seen: Vec<Card> = self.hands[0]
+            .hand
+            .cards
+            .iter()
+            .chain(self.dealer.cards.first())
+            .copied()
+            .collect();
+        for c in seen {
+            self.see(c);
+        }
+
         // Insurance is only offered against an ace, and only if the player can
         // cover half their bet.
         if self.dealer_upcard().map(|c| c.rank) == Some(Rank::Ace)
@@ -287,7 +378,7 @@ impl Game {
     fn check_naturals(&mut self) {
         self.message.clear();
         if self.dealer.is_blackjack() || self.hands[0].is_natural() {
-            self.hole_revealed = true;
+            self.reveal_hole();
             self.settle();
         } else {
             self.phase = Phase::Player;
@@ -315,6 +406,10 @@ impl Game {
                     && self.bankroll >= h.bet
                     && h.hand.cards[0].rank.base_value() == h.hand.cards[1].rank.base_value()
             }
+            // Late surrender: the first decision on a hand that was dealt, not
+            // split. By this point the dealer has already peeked for a natural,
+            // so surrendering against one is not on offer.
+            Action::Surrender => h.hand.cards.len() == 2 && self.hands.len() == 1 && !h.from_split,
         }
     }
 
@@ -324,8 +419,7 @@ impl Game {
         }
         match action {
             Action::Hit => {
-                let c = self.draw();
-                self.hands[self.active].hand.push(c);
+                self.deal_to(self.active);
                 self.finish_if_done();
             }
             Action::Stand => self.hands[self.active].done = true,
@@ -335,14 +429,25 @@ impl Game {
                 self.staked += extra;
                 self.hands[self.active].bet += extra;
                 self.hands[self.active].doubled = true;
-                let c = self.draw();
-                self.hands[self.active].hand.push(c);
+                self.deal_to(self.active);
                 // A double buys exactly one card.
                 self.hands[self.active].done = true;
             }
             Action::Split => self.split(),
+            Action::Surrender => {
+                let h = &mut self.hands[self.active];
+                h.done = true;
+                h.outcome = Some(Outcome::Surrendered);
+            }
         }
         self.advance();
+    }
+
+    /// Draw one card onto a hand, counting it as it lands face up.
+    fn deal_to(&mut self, index: usize) {
+        let c = self.draw();
+        self.see(c);
+        self.hands[index].hand.push(c);
     }
 
     fn split(&mut self) {
@@ -356,12 +461,9 @@ impl Game {
         new.hand.push(moved);
 
         self.hands[self.active].from_split = true;
-        let c = self.draw();
-        self.hands[self.active].hand.push(c);
-        let c = self.draw();
-        new.hand.push(c);
-
         self.hands.insert(self.active + 1, new);
+        self.deal_to(self.active);
+        self.deal_to(self.active + 1);
 
         // Split aces get exactly one card each and are not played on.
         if self.hands[self.active].hand.cards[0].rank == Rank::Ace {
@@ -397,12 +499,12 @@ impl Game {
             return;
         }
         // Every hand is finished. The dealer only bothers to play if there is
-        // still a live hand to beat.
-        self.hole_revealed = true;
-        if self.hands.iter().all(|h| h.hand.is_bust()) {
-            self.settle();
-        } else {
+        // still a live hand to beat — one that neither busted nor folded.
+        self.reveal_hole();
+        if self.hands.iter().any(PlayerHand::is_live) {
             self.phase = Phase::Dealer;
+        } else {
+            self.settle();
         }
     }
 
@@ -422,6 +524,7 @@ impl Game {
         }
         if self.dealer_hits() {
             let c = self.draw();
+            self.see(c);
             self.dealer.push(c);
             true
         } else {
@@ -445,7 +548,11 @@ impl Game {
         }
 
         for h in &mut self.hands {
-            let outcome = if h.hand.is_bust() {
+            let outcome = if h.is_surrendered() {
+                // Already decided the moment the player folded; the dealer's
+                // hand is irrelevant to it.
+                Outcome::Surrendered
+            } else if h.hand.is_bust() {
                 Outcome::Bust
             } else if h.is_natural() {
                 if dealer_bj {
@@ -469,11 +576,12 @@ impl Game {
             h.done = true;
 
             self.returned += match outcome {
-                // 3:2, rounded down to the dollar the way a table rounds to
-                // the nearest chip.
+                // 3:2 and the half-bet refund both round down to the dollar,
+                // the way a table rounds to the nearest chip.
                 Outcome::Blackjack => h.bet + h.bet * 3 / 2,
                 Outcome::Win => h.bet * 2,
                 Outcome::Push => h.bet,
+                Outcome::Surrendered => h.bet / 2,
                 Outcome::Lose | Outcome::Bust => 0,
             };
         }
@@ -488,10 +596,23 @@ impl Game {
         i64::from(self.returned) - i64::from(self.staked)
     }
 
+    /// What is sitting in the betting spot: the pending wager before a round
+    /// starts, and everything at risk once one is under way.
+    pub fn wagered(&self) -> u32 {
+        if self.phase == Phase::Betting {
+            self.bet
+        } else {
+            self.hands.iter().map(|h| h.bet).sum::<u32>() + self.insurance
+        }
+    }
+
     /// The single word to put on the banner when a round ends.
     pub fn banner(&self) -> &'static str {
         if self.hands.iter().any(PlayerHand::is_natural) && self.net() > 0 {
             return "BLACKJACK";
+        }
+        if self.hands.iter().all(PlayerHand::is_surrendered) {
+            return "FOLDED";
         }
         match self.net() {
             n if n > 0 => "WIN",
@@ -508,6 +629,11 @@ impl Game {
             n if n > 0 => format!("You win ${n}"),
             n => format!("You lose ${}", -n),
         };
+        // A surrendered hand never sees the dealer play, so reporting what the
+        // dealer "stands on" would be describing a hand that never happened.
+        if self.hands.iter().all(PlayerHand::is_surrendered) {
+            return format!("Surrendered. {money}.");
+        }
         let dealer = if self.dealer.is_blackjack() {
             String::from("Dealer has blackjack")
         } else if self.dealer.is_bust() {
@@ -828,6 +954,192 @@ mod tests {
                 "seed {seed} leaked money"
             );
         }
+    }
+
+    // -- surrender --------------------------------------------------------
+
+    #[test]
+    fn surrender_returns_half_the_bet() {
+        let mut g = staged(
+            &[(Rank::Ten, S), (Rank::Six, S)],
+            &[(Rank::Nine, H), (Rank::Seven, H)],
+        );
+        assert!(g.can(Action::Surrender));
+        g.act(Action::Surrender);
+        assert_eq!(g.phase, Phase::Settled, "folding ends the round outright");
+        assert_eq!(g.hands[0].outcome, Some(Outcome::Surrendered));
+        assert_eq!(g.net(), -50, "half of a $100 bet is kept");
+    }
+
+    /// The dealer has no reason to draw once the only hand has folded.
+    #[test]
+    fn surrender_stops_the_dealer_playing() {
+        let mut g = staged(
+            &[(Rank::Ten, S), (Rank::Six, S)],
+            &[(Rank::Ten, H), (Rank::Five, H)],
+        );
+        g.act(Action::Surrender);
+        assert_eq!(g.dealer.cards.len(), 2, "dealer stood pat on 15");
+    }
+
+    #[test]
+    fn cannot_surrender_after_drawing() {
+        let mut g = staged(
+            &[(Rank::Ten, S), (Rank::Six, S)],
+            &[(Rank::Nine, H), (Rank::Seven, H)],
+        );
+        g.act(Action::Hit);
+        assert!(
+            !g.can(Action::Surrender),
+            "surrender is a first decision only"
+        );
+    }
+
+    #[test]
+    fn cannot_surrender_a_split_hand() {
+        let mut g = staged(
+            &[(Rank::Eight, S), (Rank::Eight, H)],
+            &[(Rank::Nine, H), (Rank::Seven, H)],
+        );
+        g.act(Action::Split);
+        assert!(!g.can(Action::Surrender));
+    }
+
+    /// Late surrender happens after the peek, so a dealer natural has already
+    /// ended the round before the option is ever offered.
+    #[test]
+    fn cannot_surrender_against_a_dealer_natural() {
+        let mut g = Game::seeded(2);
+        g.set_bet(25);
+        g.deal();
+        g.finish_dealing();
+        if g.phase == Phase::Insurance {
+            g.take_insurance(false);
+        }
+        if g.dealer.is_blackjack() {
+            assert_ne!(g.phase, Phase::Player);
+            assert!(!g.can(Action::Surrender));
+        }
+    }
+
+    // -- the count --------------------------------------------------------
+
+    #[test]
+    fn count_starts_at_zero_and_tracks_the_cards_shown() {
+        let mut g = Game::seeded(5);
+        assert_eq!(g.running_count(), 0);
+        g.set_bet(25);
+        g.deal();
+        assert_eq!(g.running_count(), 0, "nothing counts until it is face up");
+
+        g.finish_dealing();
+        // Three cards are now visible: both of the player's and the upcard.
+        let visible: i32 = g.hands[0]
+            .hand
+            .cards
+            .iter()
+            .chain(g.dealer.cards.first())
+            .map(|c| c.rank.hi_lo())
+            .sum();
+        if !g.hole_revealed {
+            assert_eq!(g.running_count(), visible);
+        }
+    }
+
+    /// The hole card is face down, so a counter cannot have counted it yet.
+    #[test]
+    fn hole_card_only_counts_once_it_is_turned_over() {
+        let mut g = Game::seeded(9);
+        g.set_bet(25);
+        g.deal();
+        g.finish_dealing();
+        if g.phase == Phase::Insurance {
+            g.take_insurance(false);
+        }
+        if g.phase != Phase::Player {
+            return; // A natural ended it; nothing to check.
+        }
+        let before = g.running_count();
+        let hole = g.dealer.cards[1];
+        g.act(Action::Stand);
+        assert!(g.hole_revealed);
+        // Standing turns the hole card over and may start the dealer drawing,
+        // so the count moves by at least the hole card's own value.
+        let dealer_draws: i32 = g.dealer.cards[2..].iter().map(|c| c.rank.hi_lo()).sum();
+        assert_eq!(g.running_count(), before + hole.rank.hi_lo() + dealer_draws);
+    }
+
+    /// Every card that has been shown, and only those, must be in the count.
+    #[test]
+    fn count_matches_the_cards_on_the_table() {
+        for seed in 0..100 {
+            let mut g = Game::seeded(seed);
+            g.set_bet(25);
+            g.deal();
+            g.finish_dealing();
+            if g.phase == Phase::Insurance {
+                g.take_insurance(false);
+            }
+            while g.phase == Phase::Player {
+                if g.active_hand().unwrap().hand.value().total < 17 {
+                    g.act(Action::Hit);
+                } else {
+                    g.act(Action::Stand);
+                }
+            }
+            while g.dealer_step() {}
+
+            let shown: i32 = g
+                .hands
+                .iter()
+                .flat_map(|h| h.hand.cards.iter())
+                .chain(g.dealer.cards.iter())
+                .map(|c| c.rank.hi_lo())
+                .sum();
+            assert_eq!(g.running_count(), shown, "seed {seed} miscounted");
+        }
+    }
+
+    #[test]
+    fn a_fresh_shoe_wipes_the_count() {
+        let mut g = Game::seeded(6);
+        g.bankroll = 100_000;
+        g.set_bet(5);
+        // Play until the shoe is replaced, then check the count went with it.
+        for _ in 0..200 {
+            let before = g.shoe_len();
+            g.deal();
+            g.finish_dealing();
+            if g.phase == Phase::Insurance {
+                g.take_insurance(false);
+            }
+            while g.phase == Phase::Player {
+                g.act(Action::Stand);
+            }
+            while g.dealer_step() {}
+            if g.shoe_len() > before {
+                // This round came off a fresh shoe, so only its own cards count.
+                let shown: i32 = g
+                    .hands
+                    .iter()
+                    .flat_map(|h| h.hand.cards.iter())
+                    .chain(g.dealer.cards.iter())
+                    .map(|c| c.rank.hi_lo())
+                    .sum();
+                assert_eq!(g.running_count(), shown);
+                return;
+            }
+            g.next_round();
+        }
+        panic!("the shoe never ran low enough to be replaced");
+    }
+
+    #[test]
+    fn true_count_divides_by_the_decks_left() {
+        let mut g = Game::seeded(8);
+        g.running_count = 6;
+        // A six-deck shoe barely touched: the count is spread thin.
+        assert!((g.true_count() - 1.0).abs() < 0.01);
     }
 
     #[test]

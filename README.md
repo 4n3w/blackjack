@@ -21,17 +21,44 @@ actions are dimmed rather than hidden.
 | betting | `←`/`→` adjust bet, `1`/`2`/`3`/`4` for $5/$25/$100/all in, `ENTER` deal |
 | dealing | any key skips the reveal |
 | insurance | `Y` take it, `N` decline |
-| your turn | `H` hit, `S` stand, `D` double, `P` split |
+| your turn | `H` hit, `S` stand, `D` double, `P` split, `R` surrender |
 | settled | `ENTER` next hand |
-| any | `Q` or `Ctrl-C` quit |
+| any | `C` show/hide the count, `Q` or `Ctrl-C` quit |
 
 ## House rules
 
 Six decks, dealer stands on all 17s, blackjack pays 3:2, double on any two
 cards including after a split, split up to four hands, split aces get one card
-each, insurance offered when the dealer shows an ace. All of it is in the
-constants at the top of `src/game.rs` — `DEALER_HITS_SOFT_17` flips the dealer
-to H17, for instance.
+each, insurance offered when the dealer shows an ace, and late surrender on
+the first two cards of an unsplit hand for half the bet back. All of it is in
+the constants at the top of `src/game.rs` — `DEALER_HITS_SOFT_17` flips the
+dealer to H17, for instance.
+
+## The count
+
+A Hi-Lo running count is kept as you play, shown on the status line next to
+the bankroll, with the true count (running ÷ decks left) beside it. `C` hides
+it if you would rather play blind.
+
+The subtlety is *when* a card counts. It is at the moment you could see it,
+not when it leaves the shoe: the hole card sits face down for most of a round
+and must not move the count until it is turned over, and the opening deal is
+counted only once the UI has finished sliding those four cards out. A property
+test plays a hundred seeded rounds and asserts the count always equals the
+Hi-Lo sum of exactly the cards on the table. A fresh shoe resets it.
+
+## Chips
+
+The wager is shown as chips in a betting spot painted on the felt between the
+dealer and the player — a flattened diamond, the way a real one is shaped, so
+it holds a row of chips without eating the table's vertical space.
+
+Chips use the usual casino colours ($1 white, $5 red, $25 green, $100 black,
+$500 purple) and the amount is broken down greedily, which for these
+denominations is also the fewest chips — there is a test that checks that
+against a brute-force minimum. Equal chips are grouped into one stack with a
+`×N` beside it, so five denominations is the most the spot can ever be wide,
+however large the bet.
 
 ## Layout
 
@@ -41,7 +68,8 @@ to H17, for instance.
 | `src/game.rs` | The rules, as a phase machine. Knows nothing about terminals *or* time. |
 | `src/app.rs` | Key handling and the tick that paces cards onto the table. |
 | `src/ui/card.rs` | The card widget: borders, corner indices, the pip-layout table. |
-| `src/ui/mod.rs` | The table: banner, dealer row, player columns, footer. |
+| `src/ui/chip.rs` | Chips, the greedy breakdown, and the betting spot. |
+| `src/ui/mod.rs` | The table: banner, dealer row, betting spot, player columns, footer. |
 | `src/ui/theme.rs` | The palette. |
 
 `game.rs` has no `ratatui` import and no clock. A round is driven by calling
@@ -89,11 +117,21 @@ The Unicode playing-card block (`🂡`–`🂮`) is deliberately unused: one gly
 card means no control over size, patchy font coverage, and ambiguous cell width
 that breaks layout. The suit glyphs `♠♥♦♣` are safe.
 
-Two payouts round down to the dollar: a 3:2 natural on an odd bet, and
-insurance at half an odd bet. Real tables round to the nearest chip too.
+Three payouts round down to the dollar: a 3:2 natural on an odd bet,
+insurance at half an odd bet, and a surrendered odd bet. Real tables round to
+the nearest chip too.
+
+## Layout budget
+
+The table gives up detail as the window shrinks, in this order: the banner
+goes first, then the betting spot loses its painted outline, then the chips
+go entirely. Below 22 rows it says what it needs instead of drawing a broken
+table. Fans also tighten their overlap rather than clipping, so four split
+hands still fit across 74 columns.
 
 ## Not yet built
 
-Surrender, resplitting aces, a running count, or any persistence of the
-bankroll between runs. Chip graphics for the bet would be the obvious next bit
-of drawing — the tick loop already has room to slide them to the pot.
+Resplitting aces, even-money on a natural against an ace, or any persistence
+of the bankroll between runs. Sliding the chips into the spot would be the
+obvious next bit of animation — the tick loop already paces the deal and the
+dealer's draws.

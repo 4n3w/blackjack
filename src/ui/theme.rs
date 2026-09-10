@@ -21,6 +21,9 @@ pub const BACK_PATTERN: Color = Color::Rgb(58, 84, 158);
 pub const TEXT: Color = Color::Rgb(232, 232, 228);
 pub const TEXT_DIM: Color = Color::Rgb(150, 168, 156);
 
+/// The outline painted on the felt where the bet goes.
+pub const SPOT: Color = Color::Rgb(150, 128, 72);
+
 /// A winning hand.
 pub const WIN: Color = Color::Rgb(122, 201, 129);
 /// A losing or busted hand.
