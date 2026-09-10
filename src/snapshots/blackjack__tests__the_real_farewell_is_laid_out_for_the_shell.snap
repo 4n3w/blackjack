@@ -1,0 +1,7 @@
+---
+source: src/main.rs
+expression: "text.replace('\\r', \"<CR>\")"
+---
+<CR>
+You are out of chips after 1 hand.<CR>
+Stay out of my casino, Lebowski.<CR>

@@ -5,6 +5,7 @@ mod cards;
 mod game;
 mod ui;
 
+use std::io::{self, Write};
 use std::time::Duration;
 
 use color_eyre::Result;
@@ -52,16 +53,41 @@ fn main() -> Result<()> {
     // report prints — otherwise the backtrace lands in the alternate screen and
     // vanishes when it is torn down.
     color_eyre::install()?;
-    let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut TerminalInput, App::new());
+
+    // Scoped so the terminal is dropped *before* the screen is restored: its
+    // `Drop` writes a show-cursor sequence, and that has to land while the
+    // alternate screen is still up, not in the middle of the parting words.
+    let result = {
+        let mut terminal = ratatui::init();
+        run(&mut terminal, &mut TerminalInput, App::new())
+    };
     ratatui::restore();
 
     // Printed after the alternate screen is torn down, so the parting word
     // survives in the shell's scrollback rather than going with the table.
     if let Ok(Some(farewell)) = &result {
-        println!("{farewell}");
+        let mut out = io::stdout();
+        write!(out, "{}", farewell_text(farewell))?;
+        out.flush()?;
     }
     result.map(|_| ())
+}
+
+/// Lay the parting words out for a terminal that has just been handed back.
+///
+/// Two things need care. Leaving the alternate screen drops the cursor back
+/// wherever the shell left it — normally mid-line, right after `Running
+/// target/debug/blackjack` — so the text needs a blank line to start from.
+/// And the line endings are spelled out in full, because a bare newline in a
+/// terminal still shaking off raw mode moves down a row without returning to
+/// the first column, which walks the message diagonally across the screen.
+fn farewell_text(farewell: &str) -> String {
+    let mut out = String::from("\r\n");
+    for line in farewell.lines() {
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out
 }
 
 fn run<B, I>(terminal: &mut Terminal<B>, input: &mut I, mut app: App) -> Result<Option<String>>
@@ -176,6 +202,33 @@ mod tests {
     #[test]
     fn walking_away_solvent_is_a_quiet_exit() {
         assert_eq!(play(vec![KeyCode::Char('q')]), None);
+    }
+
+    /// Every line must carry its own carriage return, or the message walks
+    /// diagonally across a terminal still coming out of raw mode.
+    #[test]
+    fn the_farewell_returns_the_carriage_on_every_line() {
+        let text = farewell_text("first line\nsecond line");
+        assert_eq!(text, "\r\nfirst line\r\nsecond line\r\n");
+        assert!(
+            text.starts_with("\r\n"),
+            "it has to clear the shell's own half-written line"
+        );
+        // No bare newline anywhere: each one is preceded by a return.
+        for (i, _) in text.match_indices('\n') {
+            assert_eq!(&text[i - 1..i], "\r", "bare newline at byte {i}");
+        }
+    }
+
+    /// The real message, through the real formatting.
+    #[test]
+    fn the_real_farewell_is_laid_out_for_the_shell() {
+        let keys: Vec<KeyCode> = std::iter::repeat_with(bust_cycle)
+            .take(12)
+            .flatten()
+            .collect();
+        let text = farewell_text(&play(keys).unwrap());
+        insta::assert_snapshot!(text.replace('\r', "<CR>"));
     }
 
     /// A losing round that leaves something in the purse is not the end.

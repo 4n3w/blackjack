@@ -27,7 +27,11 @@ actions are dimmed rather than hidden.
 
 Run out of chips — that is, drop below the table minimum — and the house ends
 the session for you, with a parting word printed to the shell once the
-terminal has been handed back.
+terminal has been handed back. Those lines end in `\r\n` rather than `\n`, and
+open with a blank line: leaving the alternate screen drops the cursor back
+wherever the shell left it, and a terminal still shaking off raw mode treats a
+bare newline as "down one row" without returning to the first column, which
+walks the message diagonally down the screen.
 
 ## House rules
 
